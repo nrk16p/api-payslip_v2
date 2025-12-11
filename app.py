@@ -78,7 +78,7 @@ Base.metadata.create_all(bind=engine)
 
 # ─── Flask App ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
-CORS(app)
+CORS(app,resources={r"/*":{"origins":"*"}})
 @app.teardown_appcontext
 def remove_session(exception=None):
     """Automatically clean up sessions to prevent sleeping connections."""
