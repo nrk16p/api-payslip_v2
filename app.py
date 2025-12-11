@@ -9,6 +9,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session, relat
 from datetime import datetime
 from functools import lru_cache
 from werkzeug.utils import secure_filename
+from flask_cors import CORS   # <-- new import
 
 # ─── Configuration ─────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv(
@@ -77,7 +78,7 @@ Base.metadata.create_all(bind=engine)
 
 # ─── Flask App ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
-
+CORS(app)
 @app.teardown_appcontext
 def remove_session(exception=None):
     """Automatically clean up sessions to prevent sleeping connections."""
