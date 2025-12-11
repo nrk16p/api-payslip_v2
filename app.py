@@ -96,7 +96,7 @@ def load_item_meta():
 # ─── Health Check ─────────────────────────────────────────────────────────────
 @app.route("/healthz")
 def healthz():
-    return "OK", 200
+    return jsonify({"status": "OK", "message": "Mena Payroll API is healthy ✅"}), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────
