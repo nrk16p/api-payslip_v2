@@ -14,7 +14,7 @@ from werkzeug.utils import secure_filename
 DATABASE_URL = os.getenv(
     "DATABASE_URL"
 )
-UPLOAD_DIR = "uploads"
+UPLOAD_DIR = "/tmp/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ─── Database Engine ──────────────────────────────────────────────────────────
