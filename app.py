@@ -208,7 +208,42 @@ def salary_data():
         session.close()
         load_item_meta.cache_clear()
 
+@app.route("/salary_data/data", methods=["DELETE"])
+def delete_salary_data():
+    session = Session()
+    month = request.args.get("month-year")
+    emp_code = request.args.get("emp_id")
 
+    if not month or not emp_code:
+        session.close()
+        return jsonify({"error": "month-year and emp_id required"}), 400
+
+    try:
+        sheet = session.query(SalarySheet).filter_by(month_year=month).first()
+        emp = session.query(Employee).filter_by(emp_code=emp_code).first()
+
+        if not sheet or not emp:
+            session.close()
+            return jsonify({"status": "not_found"}), 404
+
+        deleted = session.query(SalaryItem).filter_by(
+            sheet_id=sheet.sheet_id, employee_id=emp.employee_id
+        ).delete()
+
+        session.commit()
+        return jsonify({
+            "status": "deleted",
+            "deleted_rows": deleted,
+            "emp_id": emp_code,
+            "month": month
+        }), 200
+
+    except Exception as e:
+        session.rollback()
+        return jsonify({"error": f"DB error: {str(e)}"}), 500
+
+    finally:
+        session.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
