@@ -210,8 +210,9 @@ def salary_data():
 
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 2️⃣ Upload Excel endpoint (Thai→English month + batch commit)
+# 2️⃣ Upload Excel endpoint (Optimized for 10k+ rows)
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/upload_excel", methods=["POST"])
 def upload_excel():
@@ -236,7 +237,7 @@ def upload_excel():
     # ─────────────────────────────────────────────
     df.columns = df.columns.astype(str).str.strip()
     df.columns = [c if not c.startswith("_") else f"Unnamed{c}" for c in df.columns]
-    df = df.dropna(axis=1, how="all")  # remove empty columns
+    df = df.dropna(axis=1, how="all")
 
     # ─────────────────────────────────────────────
     # 🗓 Convert Thai month (e.g. พ.ย.2568 → November2025)
@@ -263,23 +264,33 @@ def upload_excel():
     inserted_rows = 0
 
     try:
-        # Ensure sheet record exists
+        # ✅ Ensure sheet record exists
         sheet = session.query(SalarySheet).filter_by(month_year=month_value).first()
         if not sheet:
             sheet = SalarySheet(month_year=month_value)
             session.add(sheet)
             session.flush()
 
-        # Load meta mapping once
+        # ✅ Preload metadata (reduce repeated lookups)
         meta_map = {
             row.item_name: row.item_group
             for row in session.query(SalaryItemMeta.item_name, SalaryItemMeta.item_group)
         }
 
-        TOP_LEVEL = ["Sheet", "รหัสพนักงาน", "ชื่อ-นามสกุล", "สถานะคนลาออก", "prefix", "year_th"]
+        # ✅ Preload employees
+        emp_map = {
+            e.emp_code: e.employee_id
+            for e in session.query(Employee.emp_code, Employee.employee_id)
+        }
 
-        # Iterate employees
-        for _, row in df.iterrows():
+        TOP_LEVEL = ["Sheet", "รหัสพนักงาน", "ชื่อ-นามสกุล", "สถานะคนลาออก", "prefix", "year_th"]
+        salary_items = []
+        batch_size = 500  # Commit every 500 employees
+
+        # ─────────────────────────────────────────────
+        # 🔁 Iterate employees
+        # ─────────────────────────────────────────────
+        for i, row in df.iterrows():
             emp_code = str(row.get("รหัสพนักงาน", "")).strip()
             full_name = str(row.get("ชื่อ-นามสกุล", "")).strip()
             status = str(row.get("สถานะคนลาออก", "ปกติ")).strip()
@@ -287,25 +298,28 @@ def upload_excel():
             if not emp_code or emp_code.lower() in ["nan", "none"]:
                 continue
 
-            # ✅ Upsert employee (safe & non-locking)
-            session.execute(text("""
-                INSERT INTO employees (emp_code, full_name, status_name, created_at)
-                VALUES (:code, :name, :status, NOW())
-                ON DUPLICATE KEY UPDATE full_name=:name, status_name=:status
-            """), {"code": emp_code, "name": full_name, "status": status})
+            # ✅ Upsert employee if missing
+            emp_id = emp_map.get(emp_code)
+            if not emp_id:
+                session.execute(text("""
+                    INSERT INTO employees (emp_code, full_name, status_name, created_at)
+                    VALUES (:code, :name, :status, NOW())
+                    ON DUPLICATE KEY UPDATE full_name=:name, status_name=:status
+                """), {"code": emp_code, "name": full_name, "status": status})
+                session.flush()
+                emp = session.query(Employee).filter_by(emp_code=emp_code).first()
+                emp_id = emp.employee_id
+                emp_map[emp_code] = emp_id
 
-            emp = session.query(Employee).filter_by(emp_code=emp_code).first()
-
-            # Clear existing salary items
+            # 🧹 Remove existing salary items for this employee + sheet
             session.query(SalaryItem).filter_by(
-                sheet_id=sheet.sheet_id, employee_id=emp.employee_id
+                sheet_id=sheet.sheet_id, employee_id=emp_id
             ).delete()
 
-            # Insert salary items
+            # ➕ Build salary item list
             for col in df.columns:
                 if col in TOP_LEVEL:
                     continue
-
                 val = row.get(col)
                 if pd.isna(val):
                     continue
@@ -314,16 +328,26 @@ def upload_excel():
                 except Exception:
                     continue
 
-                group = meta_map.get(col, "earnings")  # default if missing
-                session.add(SalaryItem(
-                    sheet_id=sheet.sheet_id,
-                    employee_id=emp.employee_id,
-                    item_group=group,
-                    item_name=col,
-                    amount=amount
-                ))
+                group = meta_map.get(col, "earnings")
+                salary_items.append({
+                    "sheet_id": sheet.sheet_id,
+                    "employee_id": emp_id,
+                    "item_group": group,
+                    "item_name": col,
+                    "amount": amount,
+                })
 
             inserted_rows += 1
+
+            # 🧾 Commit in batches
+            if inserted_rows % batch_size == 0:
+                session.bulk_insert_mappings(SalaryItem, salary_items)
+                salary_items.clear()
+                session.commit()
+
+        # Commit remaining
+        if salary_items:
+            session.bulk_insert_mappings(SalaryItem, salary_items)
 
         session.commit()
 
@@ -340,7 +364,6 @@ def upload_excel():
         "sheet": month_value,
         "rows_inserted": inserted_rows
     }), 201
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 3️⃣ salary_items/meta CRUD
 # ─────────────────────────────────────────────────────────────────────────────
