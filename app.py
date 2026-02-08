@@ -109,7 +109,13 @@ Base.metadata.create_all(bind=engine)
 
 # ─── Flask App ─────────────────────────────────────────────────────────────
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    supports_credentials=False,
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+)
 
 @app.teardown_appcontext
 def remove_session(exception=None):
