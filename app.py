@@ -1,32 +1,57 @@
+
 import os
+from dotenv import load_dotenv
+
+load_dotenv()   # ← ต้องอยู่ตรงนี้
 import pandas as pd
 from flask import Flask, jsonify, request
 from sqlalchemy import (
     create_engine, Column, Integer, String, DECIMAL, Enum, ForeignKey,
-    TIMESTAMP, text
+    TIMESTAMP, text, DateTime, Boolean
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session, relationship
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from functools import lru_cache
 from werkzeug.utils import secure_filename
-from flask_cors import CORS   # <-- new import
+from flask_cors import CORS
 
-# ─── Configuration ─────────────────────────────────────────────────────────────
-DATABASE_URL = os.getenv(
-    "DATABASE_URL"
-)
+# ─── Timezone ─────────────────────────────────────────────────────────────
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+TZ_BKK = ZoneInfo("Asia/Bangkok")
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+def as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+def utc_to_bkk(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(TZ_BKK)
+
+# ─── Configuration ─────────────────────────────────────────────────────────
+DATABASE_URL = os.getenv("DATABASE_URL")
 UPLOAD_DIR = "/tmp/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# ─── Database Engine ──────────────────────────────────────────────────────────
+# ─── Database Engine ───────────────────────────────────────────────────────
 engine = create_engine(
     DATABASE_URL,
     pool_size=5,
     max_overflow=5,
     pool_timeout=30,
-    pool_recycle=300,  # recycle every 5 minutes
+    pool_recycle=300,
     pool_pre_ping=True,
-    isolation_level="AUTOCOMMIT",
     future=True,
 )
 
@@ -34,14 +59,14 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Session = scoped_session(SessionLocal)
 Base = declarative_base()
 
-# ─── Models ───────────────────────────────────────────────────────────────────
+# ─── Models ────────────────────────────────────────────────────────────────
 class Employee(Base):
     __tablename__ = "employees"
     employee_id = Column(Integer, primary_key=True, autoincrement=True)
     emp_code = Column(String(64), unique=True, nullable=False)
     full_name = Column(String(255), nullable=False)
     status_name = Column(String(100), default="ปกติ")
-    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+    created_at = Column(TIMESTAMP, default=now_utc)
     items = relationship("SalaryItem", back_populates="employee")
 
 
@@ -49,7 +74,12 @@ class SalarySheet(Base):
     __tablename__ = "salary_sheets"
     sheet_id = Column(Integer, primary_key=True, autoincrement=True)
     month_year = Column(String(50), unique=True, nullable=False)
-    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+
+    api_active_from = Column(DateTime, nullable=True)  # UTC
+    api_active_to = Column(DateTime, nullable=True)    # UTC
+    api_is_active = Column(Boolean, default=False)
+
+    created_at = Column(TIMESTAMP, default=now_utc)
     items = relationship("SalaryItem", back_populates="sheet")
 
 
@@ -61,6 +91,7 @@ class SalaryItem(Base):
     item_group = Column(Enum("earnings", "deductions", "summary"), nullable=False)
     item_name = Column(String(255), nullable=False)
     amount = Column(DECIMAL(14, 2), default=0)
+
     sheet = relationship("SalarySheet", back_populates="items")
     employee = relationship("Employee", back_populates="items")
 
@@ -69,96 +100,120 @@ class SalaryItemMeta(Base):
     __tablename__ = "salary_item_meta"
     meta_id = Column(Integer, primary_key=True, autoincrement=True)
     item_name = Column(String(255), unique=True, nullable=False)
-    item_group = Column(Enum("earnings", "deductions", "summary"), nullable=True)
+    item_group = Column(Enum("earnings", "deductions", "summary"))
     remark = Column(String(255))
-    updated_at = Column(TIMESTAMP, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(TIMESTAMP, default=now_utc, onupdate=now_utc)
 
 
 Base.metadata.create_all(bind=engine)
 
-# ─── Flask App ────────────────────────────────────────────────────────────────
+# ─── Flask App ─────────────────────────────────────────────────────────────
 app = Flask(__name__)
-CORS(app,resources={r"/*":{"origins":"*"}})
+CORS(app, resources={r"/*": {"origins": "*"}})
+
 @app.teardown_appcontext
 def remove_session(exception=None):
-    """Automatically clean up sessions to prevent sleeping connections."""
     Session.remove()
 
-# ─── Cache Helper ─────────────────────────────────────────────────────────────
+# ─── Cache Helper ──────────────────────────────────────────────────────────
 @lru_cache(maxsize=256)
 def load_item_meta():
-    """Return dict of {item_name: item_group} from DB."""
     session = Session()
-    meta = session.execute(text("SELECT item_name, item_group FROM salary_item_meta")).fetchall()
+    rows = session.execute(
+        text("SELECT item_name, item_group FROM salary_item_meta")
+    ).fetchall()
     session.close()
-    return {m[0]: m[1] for m in meta}
+    return {r[0]: r[1] for r in rows}
 
+from datetime import timezone
 
-# ─── Health Check ─────────────────────────────────────────────────────────────
+def as_utc(dt: datetime) -> datetime:
+    """Ensure datetime is UTC-aware"""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+# ─── Health Check ──────────────────────────────────────────────────────────
 @app.route("/healthz")
 def healthz():
-    return jsonify({"status": "OK", "message": "Mena Payroll API is healthy ✅"}), 200
+    return jsonify({"status": "OK", "timezone": "Asia/Bangkok"}), 200
 
-
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────
 # 1️⃣ GET & POST salary_data
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────
 @app.route("/salary_data/data", methods=["GET", "POST"])
 def salary_data():
     session = Session()
 
-    if request.method == "GET":
-        month = request.args.get("month-year")
-        emp_code = request.args.get("emp_id")
+    try:
+        # ─────────────────────────────────────────────
+        # GET : read + time guard
+        # ─────────────────────────────────────────────
+        if request.method == "GET":
+            month = request.args.get("month-year")
+            emp_code = request.args.get("emp_id")
+
+            if not month or not emp_code:
+                return jsonify({"error": "month-year and emp_id required"}), 400
+
+            sheet = session.query(SalarySheet).filter_by(month_year=month).first()
+            emp = session.query(Employee).filter_by(emp_code=emp_code).first()
+
+            if not sheet or not emp:
+                return jsonify([])
+
+            now = now_utc()
+            active_from = as_utc(sheet.api_active_from)
+            active_to = as_utc(sheet.api_active_to)
+
+            if active_from and now < active_from:
+                return jsonify([]), 200
+
+
+            if active_to and now > active_to:
+                return jsonify([]), 200
+
+
+            items = session.query(SalaryItem).filter_by(
+                sheet_id=sheet.sheet_id,
+                employee_id=emp.employee_id
+            ).all()
+
+            grouped = {"earnings": {}, "deductions": {}, "summary": {}}
+            for i in items:
+                grouped[i.item_group][i.item_name] = f"{float(i.amount):.2f}"
+
+            return jsonify([{
+                "Sheet": sheet.month_year,
+                "รหัสพนักงาน": emp.emp_code,
+                "ชื่อ - นามสกุล": emp.full_name,
+                "สถานะคนลาออก": emp.status_name,
+                "datalist": grouped,
+            }])
+
+        # ─────────────────────────────────────────────
+        # POST : upsert salary (ไม่คุมเวลา)
+        # ─────────────────────────────────────────────
+        data = request.get_json(force=True)
+
+        month = data.get("month-year")
+        emp_code = data.get("emp_id")
+
         if not month or not emp_code:
             return jsonify({"error": "month-year and emp_id required"}), 400
 
-        sheet = session.query(SalarySheet).filter_by(month_year=month).first()
-        emp = session.query(Employee).filter_by(emp_code=emp_code).first()
-        if not sheet or not emp:
-            session.close()
-            return jsonify([])
+        full_name = data.get("full_name", "")
+        status = data.get("status", "ปกติ")
+        datalist = data.get("datalist", {})
 
-        items = session.query(SalaryItem).filter_by(
-            sheet_id=sheet.sheet_id, employee_id=emp.employee_id
-        ).all()
-        grouped = {"earnings": {}, "deductions": {}, "summary": {}}
-        for i in items:
-            grouped[i.item_group][i.item_name] = f"{float(i.amount):.2f}"
-
-        result = [{
-            "Sheet": sheet.month_year,
-            "รหัสพนักงาน": emp.emp_code,
-            "ชื่อ - นามสกุล": emp.full_name,
-            "สถานะคนลาออก": emp.status_name,
-            "datalist": grouped,
-        }]
-        session.close()
-        return jsonify(result)
-
-    # ────────────────────────────────
-    # POST → insert or update (smart upsert)
-    # ────────────────────────────────
-    data = request.get_json(force=True)
-    month = data.get("month-year")
-    emp_code = data.get("emp_id")
-    full_name = data.get("full_name", "")
-    status = data.get("status", "ปกติ")
-    datalist = data.get("datalist", {})
-
-    if not month or not emp_code:
-        session.close()
-        return jsonify({"error": "month-year and emp_id required"}), 400
-
-    try:
-        # Ensure sheet exists
         sheet = session.query(SalarySheet).filter_by(month_year=month).first()
         if not sheet:
             sheet = SalarySheet(month_year=month)
             session.add(sheet)
             session.flush()
 
-        # Upsert employee (safe)
         session.execute(text("""
             INSERT INTO employees (emp_code, full_name, status_name, created_at)
             VALUES (:code, :name, :status, NOW())
@@ -167,88 +222,42 @@ def salary_data():
 
         emp = session.query(Employee).filter_by(emp_code=emp_code).first()
 
-        # Delete old salary items
-        session.query(SalaryItem).filter_by(sheet_id=sheet.sheet_id, employee_id=emp.employee_id).delete()
+        session.query(SalaryItem).filter_by(
+            sheet_id=sheet.sheet_id,
+            employee_id=emp.employee_id
+        ).delete()
 
-        # Reload meta map
-        meta_map = {
-            row.item_name: row.item_group
-            for row in session.query(SalaryItemMeta.item_name, SalaryItemMeta.item_group)
-        }
+        meta_map = load_item_meta()
 
-        # Insert updated salary items
         for group, items in datalist.items():
             for name, val in items.items():
                 try:
                     amount = float(val)
-                except (ValueError, TypeError):
+                except:
                     continue
 
-                g = meta_map.get(name, group)
                 session.add(SalaryItem(
                     sheet_id=sheet.sheet_id,
                     employee_id=emp.employee_id,
-                    item_group=g,
+                    item_group=meta_map.get(name, group),
                     item_name=name,
                     amount=amount
                 ))
 
         session.commit()
-        return jsonify({
-            "status": "updated",
-            "emp_id": emp_code,
-            "month": month
-        }), 201
+        return jsonify({"status": "updated"}), 201
 
     except Exception as e:
         session.rollback()
-        return jsonify({"error": f"DB error: {str(e)}"}), 500
-
-    finally:
-        session.close()
-        load_item_meta.cache_clear()
-
-@app.route("/salary_data/data", methods=["DELETE"])
-def delete_salary_data():
-    session = Session()
-    month = request.args.get("month-year")
-    emp_code = request.args.get("emp_id")
-
-    if not month or not emp_code:
-        session.close()
-        return jsonify({"error": "month-year and emp_id required"}), 400
-
-    try:
-        sheet = session.query(SalarySheet).filter_by(month_year=month).first()
-        emp = session.query(Employee).filter_by(emp_code=emp_code).first()
-
-        if not sheet or not emp:
-            session.close()
-            return jsonify({"status": "not_found"}), 404
-
-        deleted = session.query(SalaryItem).filter_by(
-            sheet_id=sheet.sheet_id, employee_id=emp.employee_id
-        ).delete()
-
-        session.commit()
-        return jsonify({
-            "status": "deleted",
-            "deleted_rows": deleted,
-            "emp_id": emp_code,
-            "month": month
-        }), 200
-
-    except Exception as e:
-        session.rollback()
-        return jsonify({"error": f"DB error: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
     finally:
         session.close()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2️⃣ Upload Excel endpoint (Optimized for 10k+ rows)
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────
+# 2️⃣ Upload Excel endpoint
+# ───────────────────────────────────────────────────────────────────────────
 @app.route("/upload_excel", methods=["POST"])
 def upload_excel():
     if "file" not in request.files:
@@ -399,9 +408,9 @@ def upload_excel():
         "sheet": month_value,
         "rows_inserted": inserted_rows
     }), 201
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────
 # 3️⃣ salary_items/meta CRUD
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────
 @app.route("/salary_items/meta", methods=["GET", "POST", "DELETE"])
 def salary_item_meta():
     session = Session()
@@ -462,6 +471,101 @@ def salary_item_meta():
         return jsonify({"status": "deleted", "item_name": name}), 200
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ───────────────────────────────────────────────────────────────────────────
+# API: Set API Window (Bangkok time input)
+# ───────────────────────────────────────────────────────────────────────────
+@app.route("/salary_sheets/api-window", methods=["PATCH"])
+def set_api_window():
+    session = Session()
+
+    try:
+        data = request.get_json(force=True)
+
+        sheet_id = data.get("sheet_id")
+        if not sheet_id:
+            return jsonify({"error": "sheet_id required"}), 400
+
+        sheet = session.get(SalarySheet, sheet_id)
+        if not sheet:
+            return jsonify({"error": "sheet not found"}), 404
+
+        # รับค่าเป็น Bangkok time
+        if "api_is_active" in data:
+            sheet.api_is_active = bool(data["api_is_active"])
+
+        if "api_active_from" in data:
+            sheet.api_active_from = (
+                datetime.fromisoformat(data["api_active_from"])
+                .replace(tzinfo=TZ_BKK)
+                .astimezone(timezone.utc)
+            )
+
+        if "api_active_to" in data:
+            sheet.api_active_to = (
+                datetime.fromisoformat(data["api_active_to"])
+                .replace(tzinfo=TZ_BKK)
+                .astimezone(timezone.utc)
+            )
+
+        session.commit()
+
+        # ✅ copy ค่าออกมาก่อน close (กัน DetachedInstanceError)
+        resp = {
+            "sheet_id": sheet.sheet_id,
+            "api_is_active": sheet.api_is_active,
+            "api_active_from_bkk": utc_to_bkk(sheet.api_active_from).isoformat()
+            if sheet.api_active_from else None,
+            "api_active_to_bkk": utc_to_bkk(sheet.api_active_to).isoformat()
+            if sheet.api_active_to else None
+        }
+
+        return jsonify(resp), 200
+
+    finally:
+        session.close()
+@app.route("/salary_sheets/api-window", methods=["GET"])
+def get_api_window():
+    session = Session()
+    try:
+        sheet_id = request.args.get("sheet_id")
+        month = request.args.get("month-year")
+
+        q = session.query(SalarySheet)
+
+        if sheet_id:
+            q = q.filter(SalarySheet.sheet_id == sheet_id)
+        elif month:
+            q = q.filter(SalarySheet.month_year == month)
+
+        sheets = q.order_by(SalarySheet.created_at.desc()).all()
+
+        result = []
+        now = now_utc()
+
+        for s in sheets:
+            active_from = as_utc(s.api_active_from)
+            active_to = as_utc(s.api_active_to)
+
+            is_active_now = (
+                s.api_is_active
+                and (not active_from or now >= active_from)
+                and (not active_to or now <= active_to)
+            )
+
+            result.append({
+                "sheet_id": s.sheet_id,
+                "month_year": s.month_year,
+                "api_is_active": s.api_is_active,
+                "api_active_from_bkk": utc_to_bkk(active_from) if active_from else None,
+                "api_active_to_bkk": utc_to_bkk(active_to) if active_to else None,
+                "is_active_now": is_active_now
+            })
+
+        return jsonify(result), 200
+
+    finally:
+        session.close()
+
+# ───────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0")
