@@ -480,12 +480,18 @@ def salary_item_meta():
 # ───────────────────────────────────────────────────────────────────────────
 # API: Set API Window (Bangkok time input)
 # ───────────────────────────────────────────────────────────────────────────
-@app.route("/salary_sheets/api-window", methods=["PATCH"])
+@app.route("/salary_sheets/api-window", methods=["PATCH", "OPTIONS"])
 def set_api_window():
+    # ✅ Handle CORS preflight
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+
     session = Session()
 
     try:
-        data = request.get_json(force=True)
+        data = request.get_json(force=True, silent=True)
+        if not data:
+            return jsonify({"error": "invalid json body"}), 400
 
         sheet_id = data.get("sheet_id")
         if not sheet_id:
@@ -495,37 +501,62 @@ def set_api_window():
         if not sheet:
             return jsonify({"error": "sheet not found"}), 404
 
-        # รับค่าเป็น Bangkok time
+        # --- api_is_active ---
         if "api_is_active" in data:
             sheet.api_is_active = bool(data["api_is_active"])
 
+        # --- api_active_from ---
         if "api_active_from" in data:
-            sheet.api_active_from = (
-                datetime.fromisoformat(data["api_active_from"])
-                .replace(tzinfo=TZ_BKK)
-                .astimezone(timezone.utc)
-            )
+            try:
+                sheet.api_active_from = (
+                    datetime.fromisoformat(data["api_active_from"])
+                    .replace(tzinfo=TZ_BKK)
+                    .astimezone(timezone.utc)
+                )
+            except Exception as e:
+                return jsonify({
+                    "error": "invalid api_active_from",
+                    "detail": str(e)
+                }), 400
 
+        # --- api_active_to ---
         if "api_active_to" in data:
-            sheet.api_active_to = (
-                datetime.fromisoformat(data["api_active_to"])
-                .replace(tzinfo=TZ_BKK)
-                .astimezone(timezone.utc)
-            )
+            try:
+                sheet.api_active_to = (
+                    datetime.fromisoformat(data["api_active_to"])
+                    .replace(tzinfo=TZ_BKK)
+                    .astimezone(timezone.utc)
+                )
+            except Exception as e:
+                return jsonify({
+                    "error": "invalid api_active_to",
+                    "detail": str(e)
+                }), 400
 
         session.commit()
 
-        # ✅ copy ค่าออกมาก่อน close (กัน DetachedInstanceError)
+        # ✅ build response BEFORE close session
         resp = {
             "sheet_id": sheet.sheet_id,
             "api_is_active": sheet.api_is_active,
-            "api_active_from_bkk": utc_to_bkk(sheet.api_active_from).isoformat()
-            if sheet.api_active_from else None,
-            "api_active_to_bkk": utc_to_bkk(sheet.api_active_to).isoformat()
-            if sheet.api_active_to else None
+            "api_active_from_bkk": (
+                utc_to_bkk(sheet.api_active_from).isoformat()
+                if sheet.api_active_from else None
+            ),
+            "api_active_to_bkk": (
+                utc_to_bkk(sheet.api_active_to).isoformat()
+                if sheet.api_active_to else None
+            ),
         }
 
         return jsonify(resp), 200
+
+    except Exception as e:
+        session.rollback()
+        return jsonify({
+            "error": "internal server error",
+            "detail": str(e)
+        }), 500
 
     finally:
         session.close()
