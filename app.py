@@ -4,7 +4,11 @@ from dotenv import load_dotenv
 
 load_dotenv()   # ← ต้องอยู่ตรงนี้
 import pandas as pd
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request , send_file
+import io
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
 from sqlalchemy import (
     create_engine, Column, Integer, String, DECIMAL, Enum, ForeignKey,
     TIMESTAMP, text, DateTime, Boolean
@@ -685,6 +689,107 @@ def salary_50tawi():
 
     except Exception as e:
         session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        session.close()
+
+# ───────────────────────────────────────────────────────────
+# Export Salary to Excel
+# ───────────────────────────────────────────────────────────
+@app.route("/salary_data/export", methods=["GET"])
+def export_salary_month_pivot():
+    session = Session()
+
+    try:
+        month = request.args.get("month-year")
+        if not month:
+            return jsonify({"error": "month-year required"}), 400
+
+        sheet = session.query(SalarySheet).filter_by(month_year=month).first()
+        if not sheet:
+            return jsonify({"error": "sheet not found"}), 404
+
+        rows = (
+            session.query(
+                Employee.emp_code,
+                Employee.full_name,
+                Employee.status_name,
+                SalaryItem.item_group,
+                SalaryItem.item_name,
+                SalaryItem.amount,
+            )
+            .join(SalaryItem, SalaryItem.employee_id == Employee.employee_id)
+            .filter(SalaryItem.sheet_id == sheet.sheet_id)
+            .all()
+        )
+
+        if not rows:
+            return jsonify({"error": "no salary data"}), 404
+
+        # ───────── Build DataFrame ─────────
+        data = []
+        for r in rows:
+            data.append({
+                "รหัสพนักงาน": r.emp_code,
+                "ชื่อ - นามสกุล": r.full_name,
+                "สถานะ": r.status_name,
+                "หมวดหมู่": r.item_group,
+                "รายการ": r.item_name,
+                "จำนวนเงิน": float(r.amount),
+            })
+
+        df = pd.DataFrame(data)
+
+        # ───────── Pivot ─────────
+        pivot = df.pivot_table(
+            index=["รหัสพนักงาน", "ชื่อ - นามสกุล", "สถานะ"],
+            columns="รายการ",
+            values="จำนวนเงิน",
+            aggfunc="sum",
+            fill_value=0,
+        ).reset_index()
+
+        # ───────── Calculate Net Pay ─────────
+        earnings_cols = df[df["หมวดหมู่"] == "earnings"]["รายการ"].unique()
+        deductions_cols = df[df["หมวดหมู่"] == "deductions"]["รายการ"].unique()
+
+        pivot["Total Earnings"] = pivot[list(earnings_cols)].sum(axis=1) if len(earnings_cols) else 0
+        pivot["Total Deductions"] = pivot[list(deductions_cols)].sum(axis=1) if len(deductions_cols) else 0
+        pivot["Net Pay"] = pivot["Total Earnings"] - pivot["Total Deductions"]
+
+        # ───────── Write Excel ─────────
+        output = io.BytesIO()
+
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            pivot.to_excel(writer, index=False, sheet_name="Payroll")
+
+            worksheet = writer.sheets["Payroll"]
+
+            # Bold header
+            for cell in worksheet[1]:
+                cell.font = Font(bold=True)
+
+            # Auto column width
+            for i, col in enumerate(pivot.columns, 1):
+                max_length = max(
+                    pivot[col].astype(str).map(len).max(),
+                    len(col)
+                )
+                worksheet.column_dimensions[get_column_letter(i)].width = max_length + 5
+
+        output.seek(0)
+
+        filename = f"payroll_pivot_{month}.xlsx"
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
     finally:
