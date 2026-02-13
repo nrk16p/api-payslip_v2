@@ -617,7 +617,7 @@ def get_api_window():
 # ─────────────────────────────────────────────────────────────
 # 4️⃣ 50ทวิ API
 # ─────────────────────────────────────────────────────────────
-@app.route("/salary_data/50tawi/data", methods=["GET", "POST"])
+@app.route("/50tawi/data", methods=["GET", "POST"])
 def salary_50tawi():
     session = Session()
 
