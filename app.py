@@ -104,6 +104,17 @@ class SalaryItemMeta(Base):
     remark = Column(String(255))
     updated_at = Column(TIMESTAMP, default=now_utc, onupdate=now_utc)
 
+class Salary50Tawi(Base):
+    __tablename__ = "salary_50tawi"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    year = Column(String(10), nullable=False)  # 2569
+    employee_id = Column(Integer, ForeignKey("employees.employee_id"), nullable=False)
+    url_pdf = Column(String(500), nullable=True)
+
+    created_at = Column(TIMESTAMP, default=now_utc)
+
+    employee = relationship("Employee")
 
 Base.metadata.create_all(bind=engine)
 
@@ -603,6 +614,81 @@ def get_api_window():
     finally:
         session.close()
 
+# ─────────────────────────────────────────────────────────────
+# 4️⃣ 50ทวิ API
+# ─────────────────────────────────────────────────────────────
+@app.route("/salary_data/50tawi/data", methods=["GET", "POST"])
+def salary_50tawi():
+    session = Session()
+
+    try:
+        # ───────────── GET ─────────────
+        if request.method == "GET":
+            year = request.args.get("year")
+            emp_code = request.args.get("emp_id")
+
+            if not year or not emp_code:
+                return jsonify({"error": "year and emp_id required"}), 400
+
+            emp = session.query(Employee).filter_by(emp_code=emp_code).first()
+            if not emp:
+                return jsonify([])
+
+            record = session.query(Salary50Tawi).filter_by(
+                year=year,
+                employee_id=emp.employee_id
+            ).first()
+
+            if not record:
+                return jsonify([])
+
+            return jsonify([{
+                "Sheet": year,
+                "url_pdf": record.url_pdf,
+                "ชื่อ - นามสกุล": emp.full_name,
+                "รหัสพนักงาน": emp.emp_code,
+                "สถานะคนลาออก": emp.status_name,
+            }])
+
+        # ───────────── POST (upsert) ─────────────
+        data = request.get_json(force=True)
+
+        year = data.get("year")
+        emp_code = data.get("emp_id")
+        url_pdf = data.get("url_pdf")
+
+        if not year or not emp_code:
+            return jsonify({"error": "year and emp_id required"}), 400
+
+        emp = session.query(Employee).filter_by(emp_code=emp_code).first()
+        if not emp:
+            return jsonify({"error": "employee not found"}), 404
+
+        record = session.query(Salary50Tawi).filter_by(
+            year=year,
+            employee_id=emp.employee_id
+        ).first()
+
+        if not record:
+            record = Salary50Tawi(
+                year=year,
+                employee_id=emp.employee_id,
+                url_pdf=url_pdf
+            )
+            session.add(record)
+        else:
+            record.url_pdf = url_pdf
+
+        session.commit()
+
+        return jsonify({"status": "updated"}), 201
+
+    except Exception as e:
+        session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+    finally:
+        session.close()
 # ───────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0")
