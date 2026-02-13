@@ -780,7 +780,7 @@ def export_salary_month_pivot():
 
         output.seek(0)
 
-        filename = f"payroll_pivot_{month}.xlsx"
+        filename = f"payroll_{month}.xlsx"
 
         return send_file(
             output,
