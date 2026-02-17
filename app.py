@@ -848,6 +848,8 @@ def get_unique_employees():
                 Employee.emp_code,
                 Employee.full_name
             )
+            .filter(Employee.full_name.isnot(None))   # ✅ กัน NULL
+            .filter(Employee.full_name != "")         # ✅ กันค่าว่าง
             .distinct()
             .order_by(Employee.emp_code)
             .all()
