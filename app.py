@@ -839,40 +839,30 @@ def export_salary_month_pivot():
     finally:
         session.close()
 
-@app.route("/salary/employee_id", methods=["GET"])
-def get_unique_emp_codes():
+@app.route("/salary/employees", methods=["GET"])
+def get_unique_employees():
     session = Session()
     try:
         results = (
-            session.query(Employee.emp_code)
+            session.query(
+                Employee.emp_code,
+                Employee.full_name
+            )
             .distinct()
             .order_by(Employee.emp_code)
             .all()
         )
 
-        data = [r[0] for r in results]
+        data = [
+            {
+                "emp_code": r.emp_code,
+                "full_name": r.full_name
+            }
+            for r in results
+        ]
 
         return jsonify({
-            "emp_codes": data
-        })
-
-    finally:
-        session.close()
-@app.route("/salary/fullname", methods=["GET"])
-def get_unique_full_names():
-    session = Session()
-    try:
-        results = (
-            session.query(Employee.full_name)
-            .distinct()
-            .order_by(Employee.full_name)
-            .all()
-        )
-
-        data = [r[0] for r in results]
-
-        return jsonify({
-            "full_names": data
+            "employees": data
         })
 
     finally:
