@@ -348,7 +348,24 @@ def upload_excel():
             for e in session.query(Employee.emp_code, Employee.employee_id)
         }
 
+        # ─────────────────────────────────────────────
+        # 🔍 Validate Columns Against SalaryItemMeta
+        # ─────────────────────────────────────────────
+
         TOP_LEVEL = ["Sheet", "รหัสพนักงาน", "ชื่อ-นามสกุล", "สถานะคนลาออก", "prefix", "year_th"]
+
+        excel_columns = [c for c in df.columns if c not in TOP_LEVEL]
+
+        meta_item_names = set(meta_map.keys())
+
+        unknown_columns = [c for c in excel_columns if c not in meta_item_names]
+
+        if unknown_columns:
+            return jsonify({
+                "error": "Unknown salary columns detected",
+                "unknown_columns": unknown_columns,
+                "message": "Please add these columns into salary_item_meta before upload"
+            }), 400
         salary_items = []
         batch_size = 10  # Commit every 500 employees
 
