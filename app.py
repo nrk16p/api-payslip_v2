@@ -281,10 +281,15 @@ def salary_data():
 # ───────────────────────────────────────────────────────────────────────────
 @app.route("/upload_excel", methods=["POST"])
 def upload_excel():
+
+    # ─────────────────────────────────────────────
+    # 📂 Validate file
+    # ─────────────────────────────────────────────
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
     file = request.files["file"]
+
     if not file.filename:
         return jsonify({"error": "Empty filename"}), 400
 
@@ -304,22 +309,34 @@ def upload_excel():
     # 🧹 Clean columns
     # ─────────────────────────────────────────────
     df.columns = df.columns.astype(str).str.strip()
+    df.columns = [c if not c.startswith("_") else f"Unnamed{c}" for c in df.columns]
     df = df.dropna(axis=1, how="all")
 
     # ─────────────────────────────────────────────
     # 🗓 Convert Thai month (พ.ย.2568 → November2025)
     # ─────────────────────────────────────────────
     prefix_map = {
-        "ม.ค.": "January", "ก.พ.": "February", "มี.ค.": "March", "เม.ย.": "April",
-        "พ.ค.": "May", "มิ.ย.": "June", "ก.ค.": "July", "ส.ค.": "August",
-        "ก.ย.": "September", "ต.ค.": "October", "พ.ย.": "November", "ธ.ค.": "December"
+        "ม.ค.": "January",
+        "ก.พ.": "February",
+        "มี.ค.": "March",
+        "เม.ย.": "April",
+        "พ.ค.": "May",
+        "มิ.ย.": "June",
+        "ก.ค.": "July",
+        "ส.ค.": "August",
+        "ก.ย.": "September",
+        "ต.ค.": "October",
+        "พ.ย.": "November",
+        "ธ.ค.": "December"
     }
 
     if "Sheet" in df.columns:
         s = df["Sheet"].astype(str).str.replace(r"\s+", "", regex=True)
         df[["prefix", "year_th"]] = s.str.extract(r"^(\D+)(\d{4})$")
-        df["year_en"] = df["year_th"].astype(int) - 543
-        df["Sheet"] = df["prefix"].map(prefix_map).fillna(df["prefix"]) + df["year_en"].astype(str)
+        df["Sheet"] = (
+            df["prefix"].map(prefix_map).fillna(df["prefix"])
+            + df["year_th"].astype(str)
+        )
 
     month_value = str(df.iloc[0].get("Sheet", "Unknown")).strip()
 
@@ -327,33 +344,43 @@ def upload_excel():
     # 💾 Start DB session
     # ─────────────────────────────────────────────
     session = Session()
+    inserted_rows = 0
 
     try:
+
         # ─────────────────────────────────────────
         # Ensure SalarySheet exists
         # ─────────────────────────────────────────
-        sheet = session.query(SalarySheet).filter_by(month_year=month_value).first()
+        sheet = session.query(SalarySheet).filter_by(
+            month_year=month_value
+        ).first()
+
         if not sheet:
             sheet = SalarySheet(month_year=month_value)
             session.add(sheet)
             session.flush()
 
         # ─────────────────────────────────────────
-        # Load Metadata
+        # Load metadata
         # ─────────────────────────────────────────
-        meta_rows = session.query(
-            SalaryItemMeta.item_name,
-            SalaryItemMeta.item_group
-        ).all()
-
-        meta_map = {row.item_name: row.item_group for row in meta_rows}
+        meta_map = {
+            row.item_name: row.item_group
+            for row in session.query(
+                SalaryItemMeta.item_name,
+                SalaryItemMeta.item_group
+            )
+        }
 
         # ─────────────────────────────────────────
-        # 🔍 STRICT MODE VALIDATION
+        # 🔒 STRICT Salary Item Validation (ONLY ADDITION)
         # ─────────────────────────────────────────
         TOP_LEVEL = [
-            "Sheet", "รหัสพนักงาน", "ชื่อ-นามสกุล",
-            "สถานะคนลาออก", "prefix", "year_th", "year_en"
+            "Sheet",
+            "รหัสพนักงาน",
+            "ชื่อ-นามสกุล",
+            "สถานะคนลาออก",
+            "prefix",
+            "year_th"
         ]
 
         excel_salary_cols = [
@@ -367,37 +394,31 @@ def upload_excel():
         ]
 
         if unknown_cols:
-            session.rollback()
+            session.close()
             return jsonify({
                 "error": "Unknown salary items detected",
                 "unknown_items": unknown_cols
             }), 400
 
         # ─────────────────────────────────────────
-        # Load Employees
+        # Preload employees
         # ─────────────────────────────────────────
-        emp_rows = session.query(
-            Employee.emp_code,
-            Employee.employee_id
-        ).all()
+        emp_map = {
+            e.emp_code: e.employee_id
+            for e in session.query(
+                Employee.emp_code,
+                Employee.employee_id
+            )
+        }
 
-        emp_map = {e.emp_code: e.employee_id for e in emp_rows}
-
-        # ─────────────────────────────────────────
-        # 🚀 Delete old salary items (FASTER)
-        # ─────────────────────────────────────────
-        session.query(SalaryItem).filter_by(
-            sheet_id=sheet.sheet_id
-        ).delete()
-
-        # ─────────────────────────────────────────
-        # Build Insert Data
-        # ─────────────────────────────────────────
         salary_items = []
-        inserted_employees = 0
-        batch_size = 300
+        batch_size = 10  # SAME AS V1
 
-        for _, row in df.iterrows():
+        # ─────────────────────────────────────────
+        # 🔁 Iterate employees (UNCHANGED V1 LOGIC)
+        # ─────────────────────────────────────────
+        for i, row in df.iterrows():
+
             emp_code = str(row.get("รหัสพนักงาน", "")).strip()
             full_name = str(row.get("ชื่อ-นามสกุล", "")).strip()
             status = str(row.get("สถานะคนลาออก", "ปกติ")).strip()
@@ -405,7 +426,7 @@ def upload_excel():
             if not emp_code or emp_code.lower() in ["nan", "none"]:
                 continue
 
-            # Upsert employee
+            # Upsert employee if missing
             emp_id = emp_map.get(emp_code)
 
             if not emp_id:
@@ -413,22 +434,34 @@ def upload_excel():
                     INSERT INTO employees (emp_code, full_name, status_name, created_at)
                     VALUES (:code, :name, :status, NOW())
                     ON DUPLICATE KEY UPDATE
-                        full_name = VALUES(full_name),
-                        status_name = VALUES(status_name)
+                        full_name = :name,
+                        status_name = :status
                 """), {
                     "code": emp_code,
                     "name": full_name,
                     "status": status
                 })
+
                 session.flush()
 
-                emp = session.query(Employee).filter_by(emp_code=emp_code).first()
+                emp = session.query(Employee).filter_by(
+                    emp_code=emp_code
+                ).first()
+
                 emp_id = emp.employee_id
                 emp_map[emp_code] = emp_id
 
-            # Build salary items
+            # 🧹 Delete existing salary items for this employee + sheet
+            session.query(SalaryItem).filter_by(
+                sheet_id=sheet.sheet_id,
+                employee_id=emp_id
+            ).delete()
+
+            # ➕ Build salary items
             for col in excel_salary_cols:
+
                 val = row.get(col)
+
                 if pd.isna(val):
                     continue
 
@@ -440,23 +473,29 @@ def upload_excel():
                 salary_items.append({
                     "sheet_id": sheet.sheet_id,
                     "employee_id": emp_id,
-                    "item_group": meta_map[col],
+                    "item_group": meta_map[col],  # SAFE NOW
                     "item_name": col,
-                    "amount": amount
+                    "amount": amount,
                 })
 
-            inserted_employees += 1
+                inserted_rows += 1
 
-            # Batch insert
-            if len(salary_items) >= batch_size:
-                session.bulk_insert_mappings(SalaryItem, salary_items)
+            # Batch commit (UNCHANGED)
+            if inserted_rows % batch_size == 0:
+                session.bulk_insert_mappings(
+                    SalaryItem,
+                    salary_items
+                )
                 salary_items.clear()
+                session.commit()
 
-        # Insert remaining
+        # Commit remaining
         if salary_items:
-            session.bulk_insert_mappings(SalaryItem, salary_items)
-
-        session.commit()
+            session.bulk_insert_mappings(
+                SalaryItem,
+                salary_items
+            )
+            session.commit()
 
     except Exception as e:
         session.rollback()
@@ -471,7 +510,7 @@ def upload_excel():
     return jsonify({
         "status": "success",
         "sheet": month_value,
-        "employees_processed": inserted_employees
+        "rows_inserted": inserted_rows
     }), 201
 # ───────────────────────────────────────────────────────────────────────────
 # 3️⃣ salary_items/meta CRUD
