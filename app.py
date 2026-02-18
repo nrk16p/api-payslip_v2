@@ -282,6 +282,9 @@ def salary_data():
 @app.route("/upload_excel", methods=["POST"])
 def upload_excel():
 
+    import unicodedata
+    import difflib
+
     # ─────────────────────────────────────────────
     # 📂 Validate file
     # ─────────────────────────────────────────────
@@ -289,7 +292,6 @@ def upload_excel():
         return jsonify({"error": "No file uploaded"}), 400
 
     file = request.files["file"]
-
     if not file.filename:
         return jsonify({"error": "Empty filename"}), 400
 
@@ -308,13 +310,19 @@ def upload_excel():
     # ─────────────────────────────────────────────
     # 🧹 Clean columns
     # ─────────────────────────────────────────────
-    df.columns = df.columns.astype(str).str.strip()
-    df.columns = [c if not c.startswith("_") else f"Unnamed{c}" for c in df.columns]
+    def normalize_text(text):
+        if text is None:
+            return ""
+        text = unicodedata.normalize("NFKC", str(text))
+        return text.strip().lower()
+
+    # keep original column names for DB insert
+    original_columns = df.columns.astype(str).str.strip().tolist()
+    df.columns = original_columns
     df = df.dropna(axis=1, how="all")
 
     # ─────────────────────────────────────────────
-    # 🗓 Convert Thai month (พ.ย.2568 → November2568)
-    # (same as your V1 logic)
+    # 🗓 Convert Thai month (same as your V1 logic)
     # ─────────────────────────────────────────────
     prefix_map = {
         "ม.ค.": "January",
@@ -369,10 +377,17 @@ def upload_excel():
             SalaryItemMeta.item_group
         ).all()
 
-        meta_map = {row.item_name: row.item_group for row in meta_rows}
+        # Normalized metadata map
+        normalized_meta_map = {
+            normalize_text(row.item_name): row.item_group
+            for row in meta_rows
+        }
+
+        # Original metadata names (for response display)
+        meta_display_names = [row.item_name for row in meta_rows]
 
         # ─────────────────────────────────────────
-        # 🔒 STRICT Salary Item Validation
+        # 🔒 SMART Salary Item Validation
         # ─────────────────────────────────────────
         TOP_LEVEL = [
             "Sheet",
@@ -388,19 +403,36 @@ def upload_excel():
             if col not in TOP_LEVEL
         ]
 
-        unknown_cols = [
-            col for col in excel_salary_cols
-            if col not in meta_map
-        ]
+        unknown_cols = []
+        suggestions = {}
+        normalized_column_map = {}  # map original col → normalized
+
+        for col in excel_salary_cols:
+            norm_col = normalize_text(col)
+            normalized_column_map[col] = norm_col
+
+            if norm_col not in normalized_meta_map:
+                unknown_cols.append(col)
+
+                # find closest suggestion
+                matches = difflib.get_close_matches(
+                    norm_col,
+                    normalized_meta_map.keys(),
+                    n=1,
+                    cutoff=0.6
+                )
+
+                if matches:
+                    suggestions[col] = matches[0]
 
         if unknown_cols:
             session.close()
             return jsonify({
                 "error": "Unknown salary items detected",
-                "message": "Some Excel columns do not match salary_item_meta.",
                 "unknown_columns": unknown_cols,
-                "allowed_columns": sorted(list(meta_map.keys())),
-                "hint": "Please fix spelling or create metadata before uploading."
+                "suggestions": suggestions,
+                "allowed_columns": sorted(meta_display_names),
+                "hint": "Check spelling, hidden spaces, or create metadata before uploading."
             }), 400
 
         # ─────────────────────────────────────────
@@ -414,10 +446,10 @@ def upload_excel():
         emp_map = {e.emp_code: e.employee_id for e in emp_rows}
 
         salary_items = []
-        batch_size = 10  # SAME AS V1
+        batch_size = 10  # SAME AS YOUR V1
 
         # ─────────────────────────────────────────
-        # 🔁 Iterate employees (UNCHANGED V1 LOGIC)
+        # 🔁 Iterate employees (UNCHANGED V1 STRUCTURE)
         # ─────────────────────────────────────────
         for _, row in df.iterrows():
 
@@ -428,9 +460,9 @@ def upload_excel():
             if not emp_code or emp_code.lower() in ["nan", "none"]:
                 continue
 
-            # Upsert employee
             emp_id = emp_map.get(emp_code)
 
+            # Upsert employee if missing
             if not emp_id:
                 session.execute(text("""
                     INSERT INTO employees (emp_code, full_name, status_name, created_at)
@@ -453,7 +485,7 @@ def upload_excel():
                 emp_id = emp.employee_id
                 emp_map[emp_code] = emp_id
 
-            # Delete existing salary items for this employee + sheet
+            # Delete existing salary items (V1 behavior)
             session.query(SalaryItem).filter_by(
                 sheet_id=sheet.sheet_id,
                 employee_id=emp_id
@@ -463,7 +495,6 @@ def upload_excel():
             for col in excel_salary_cols:
 
                 val = row.get(col)
-
                 if pd.isna(val):
                     continue
 
@@ -472,11 +503,14 @@ def upload_excel():
                 except Exception:
                     continue
 
+                norm_col = normalized_column_map[col]
+                group = normalized_meta_map[norm_col]
+
                 salary_items.append({
                     "sheet_id": sheet.sheet_id,
                     "employee_id": emp_id,
-                    "item_group": meta_map[col],
-                    "item_name": col,
+                    "item_group": group,
+                    "item_name": col,  # keep original display name
                     "amount": amount,
                 })
 
@@ -491,7 +525,7 @@ def upload_excel():
                 salary_items.clear()
                 session.commit()
 
-        # Commit remaining
+        # Final commit
         if salary_items:
             session.bulk_insert_mappings(
                 SalaryItem,
