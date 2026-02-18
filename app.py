@@ -316,9 +316,10 @@ def upload_excel():
     if "Sheet" in df.columns:
         s = df["Sheet"].astype(str).str.replace(r"\s+", "", regex=True)
         df[["prefix", "year_th"]] = s.str.extract(r"^(\D+)(\d{4})$")
-        df["Sheet"] = df["prefix"].map(prefix_map).fillna(df["prefix"]) + (
-            (df["year_th"].astype(float)).astype(int).astype(str)
-        )
+        df["Sheet"] = (
+        df["prefix"].map(prefix_map).fillna(df["prefix"]) +
+        df["year_th"]   # 🔥 ไม่ต้อง convert float/int แล้ว
+    )
 
     month_value = str(df.iloc[0].get("Sheet", "Unknown")).strip()
 
