@@ -313,7 +313,8 @@ def upload_excel():
     df = df.dropna(axis=1, how="all")
 
     # ─────────────────────────────────────────────
-    # 🗓 Convert Thai month (พ.ย.2568 → November2025)
+    # 🗓 Convert Thai month (พ.ย.2568 → November2568)
+    # (same as your V1 logic)
     # ─────────────────────────────────────────────
     prefix_map = {
         "ม.ค.": "January",
@@ -363,16 +364,15 @@ def upload_excel():
         # ─────────────────────────────────────────
         # Load metadata
         # ─────────────────────────────────────────
-        meta_map = {
-            row.item_name: row.item_group
-            for row in session.query(
-                SalaryItemMeta.item_name,
-                SalaryItemMeta.item_group
-            )
-        }
+        meta_rows = session.query(
+            SalaryItemMeta.item_name,
+            SalaryItemMeta.item_group
+        ).all()
+
+        meta_map = {row.item_name: row.item_group for row in meta_rows}
 
         # ─────────────────────────────────────────
-        # 🔒 STRICT Salary Item Validation (ONLY ADDITION)
+        # 🔒 STRICT Salary Item Validation
         # ─────────────────────────────────────────
         TOP_LEVEL = [
             "Sheet",
@@ -397,19 +397,21 @@ def upload_excel():
             session.close()
             return jsonify({
                 "error": "Unknown salary items detected",
-                "unknown_items": unknown_cols
+                "message": "Some Excel columns do not match salary_item_meta.",
+                "unknown_columns": unknown_cols,
+                "allowed_columns": sorted(list(meta_map.keys())),
+                "hint": "Please fix spelling or create metadata before uploading."
             }), 400
 
         # ─────────────────────────────────────────
         # Preload employees
         # ─────────────────────────────────────────
-        emp_map = {
-            e.emp_code: e.employee_id
-            for e in session.query(
-                Employee.emp_code,
-                Employee.employee_id
-            )
-        }
+        emp_rows = session.query(
+            Employee.emp_code,
+            Employee.employee_id
+        ).all()
+
+        emp_map = {e.emp_code: e.employee_id for e in emp_rows}
 
         salary_items = []
         batch_size = 10  # SAME AS V1
@@ -417,7 +419,7 @@ def upload_excel():
         # ─────────────────────────────────────────
         # 🔁 Iterate employees (UNCHANGED V1 LOGIC)
         # ─────────────────────────────────────────
-        for i, row in df.iterrows():
+        for _, row in df.iterrows():
 
             emp_code = str(row.get("รหัสพนักงาน", "")).strip()
             full_name = str(row.get("ชื่อ-นามสกุล", "")).strip()
@@ -426,7 +428,7 @@ def upload_excel():
             if not emp_code or emp_code.lower() in ["nan", "none"]:
                 continue
 
-            # Upsert employee if missing
+            # Upsert employee
             emp_id = emp_map.get(emp_code)
 
             if not emp_id:
@@ -451,13 +453,13 @@ def upload_excel():
                 emp_id = emp.employee_id
                 emp_map[emp_code] = emp_id
 
-            # 🧹 Delete existing salary items for this employee + sheet
+            # Delete existing salary items for this employee + sheet
             session.query(SalaryItem).filter_by(
                 sheet_id=sheet.sheet_id,
                 employee_id=emp_id
             ).delete()
 
-            # ➕ Build salary items
+            # Build salary items
             for col in excel_salary_cols:
 
                 val = row.get(col)
@@ -473,14 +475,14 @@ def upload_excel():
                 salary_items.append({
                     "sheet_id": sheet.sheet_id,
                     "employee_id": emp_id,
-                    "item_group": meta_map[col],  # SAFE NOW
+                    "item_group": meta_map[col],
                     "item_name": col,
                     "amount": amount,
                 })
 
                 inserted_rows += 1
 
-            # Batch commit (UNCHANGED)
+            # Batch commit (same as V1)
             if inserted_rows % batch_size == 0:
                 session.bulk_insert_mappings(
                     SalaryItem,
@@ -512,6 +514,7 @@ def upload_excel():
         "sheet": month_value,
         "rows_inserted": inserted_rows
     }), 201
+
 # ───────────────────────────────────────────────────────────────────────────
 # 3️⃣ salary_items/meta CRUD
 # ───────────────────────────────────────────────────────────────────────────
