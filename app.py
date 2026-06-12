@@ -3,11 +3,10 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()   # ← ต้องอยู่ตรงนี้
-import pandas as pd
+# pandas / openpyxl are imported lazily inside the endpoints that need them
+# (/upload_excel, /salary_data/export) to keep serverless cold starts fast.
 from flask import Flask, jsonify, request , send_file
 import io
-from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 
 from sqlalchemy import (
     create_engine, Column, Integer, String, DECIMAL, Enum, ForeignKey,
@@ -49,15 +48,25 @@ UPLOAD_DIR = "/tmp/uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ─── Database Engine ───────────────────────────────────────────────────────
-engine = create_engine(
-    DATABASE_URL,
-    pool_size=5,
-    max_overflow=5,
-    pool_timeout=30,
-    pool_recycle=300,
-    pool_pre_ping=True,
-    future=True,
-)
+if os.getenv("VERCEL"):
+    # Serverless: instances are short-lived, so a connection pool only holds
+    # MySQL connections hostage. Open/close per request instead.
+    from sqlalchemy.pool import NullPool
+    engine = create_engine(
+        DATABASE_URL,
+        poolclass=NullPool,
+        future=True,
+    )
+else:
+    engine = create_engine(
+        DATABASE_URL,
+        pool_size=5,
+        max_overflow=5,
+        pool_timeout=30,
+        pool_recycle=300,
+        pool_pre_ping=True,
+        future=True,
+    )
 
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Session = scoped_session(SessionLocal)
@@ -120,7 +129,11 @@ class Salary50Tawi(Base):
 
     employee = relationship("Employee")
 
-Base.metadata.create_all(bind=engine)
+# Schema creation queries MySQL on every import — far too expensive to run on
+# every serverless cold start. Tables already exist in production; set
+# RUN_CREATE_ALL=1 (once) only when bootstrapping a fresh database.
+if os.getenv("RUN_CREATE_ALL") == "1":
+    Base.metadata.create_all(bind=engine)
 
 # ─── Flask App ─────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -281,6 +294,8 @@ def salary_data():
 # ───────────────────────────────────────────────────────────────────────────
 @app.route("/upload_excel", methods=["POST"])
 def upload_excel():
+    import pandas as pd
+
     if "file" not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
 
@@ -717,6 +732,10 @@ def salary_50tawi():
 # ───────────────────────────────────────────────────────────
 @app.route("/salary_data/export", methods=["GET"])
 def export_salary_month_pivot():
+    import pandas as pd
+    from openpyxl.utils import get_column_letter
+    from openpyxl.styles import Font
+
     session = Session()
 
     try:
